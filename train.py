@@ -1,9 +1,9 @@
 """
 train.py
 --------
-Deneyi kur + episodic e-prop egitim dongusu.
-Her trial: run_trial -> istenen dW -> (W_rec,W_in) writer uzerinden cihaza,
-readout (W_out,b_out) ideal (veya istege bagli cihazda).
+Configures the SNN experiment + executes the episodic e-prop training loop.
+Each trial: runs network forward pass -> obtains gradients -> updates (W_rec, W_in) on device via Synapse/Writer,
+while readout parameters (W_out, b_out) are updated ideally (or on-device optionally).
 """
 from __future__ import annotations
 import math
@@ -30,7 +30,7 @@ def build(cfg):
     g = torch.Generator(device="cpu").manual_seed(trc.seed)
     n, n_in, n_out = nc.n_rec, tc.n_in, tc.n_out
 
-    # --- baslangic agirliklari ---
+    # --- Initial weights setup ---
     W_rec0 = (trc.w_gain / math.sqrt(n)) * torch.randn(n, n, generator=g)
     W_rec0.fill_diagonal_(0.0)
     W_in0 = (trc.w_gain / math.sqrt(n_in)) * torch.randn(n, n_in, generator=g)
@@ -38,7 +38,7 @@ def build(cfg):
     W_out = W_out.to(dev)
     b_out = torch.zeros(n_out, device=dev)
 
-    # --- cihazlar + sinapslar (W_rec, W_in cihazda) ---
+    # --- Synapse and Device setup (W_rec and W_in are on-device) ---
     syn_rec = Synapse(_make_device((n, n), dc, dev, trc.seed + 1),
                       sc.w_range, sc.writer, sc.verify_max_iter)
     syn_in = Synapse(_make_device((n, n_in), dc, dev, trc.seed + 2),
@@ -46,12 +46,12 @@ def build(cfg):
     syn_rec.init_weight(W_rec0.to(dev))
     syn_in.init_weight(W_in0.to(dev))
 
-    # --- learning-signal feedback B ---
+    # --- Learning-signal feedback B ---
     if trc.eprop_variant == "symmetric":
-        B_rec = W_out                                  # W_out'u takip eder (ayni tensor)
+        B_rec = W_out                                  # Tracks W_out (shares the same tensor)
     elif trc.eprop_variant == "random":
         B_rec = (1.0 / math.sqrt(n)) * torch.randn(n_out, n, generator=g)
-        B_rec = B_rec.to(dev)                           # sabit
+        B_rec = B_rec.to(dev)                           # Static random feedback
     else:
         raise ValueError(trc.eprop_variant)
 
@@ -69,11 +69,11 @@ def train(cfg, verbose=True):
     for it in range(trc.n_trials):
         res = net.run_trial(X, Y)
 
-        # W_rec, W_in -> writer -> cihaz
+        # Write weights updates: W_rec, W_in -> writer -> device
         net.syn_rec.update(-lr * res["grad_rec"])
         net.syn_in.update(-lr * res["grad_in"])
 
-        # readout (ideal, yerinde guncelle -> symmetric B_rec otomatik takip eder)
+        # Readout updates (ideal updates -> symmetric B_rec automatically follows)
         net.W_out.add_(-lr * res["grad_out"])
         net.b_out.add_(-lr * res["grad_b"])
 

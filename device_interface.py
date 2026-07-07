@@ -1,8 +1,9 @@
 """
 device_interface.py
 -------------------
-Cihaz kontrati. Writer SADECE bunu gorur; IdealDevice ile Memtransistor
-arasindaki tek fark cihaz nesnesidir (egitim dongusu birebir ayni kalir).
+Device contract interface. The Synapse/Writer only sees this abstraction.
+The only difference between IdealDevice and Memtransistor is the device object instance,
+while the surrounding training loop code remains completely identical.
 """
 from __future__ import annotations
 from abc import ABC, abstractmethod
@@ -10,7 +11,7 @@ import torch
 
 
 class ConductanceDevice(ABC):
-    """Paralel simule edilen analog bellek cihazi populasyonu (sekil == agirlik)."""
+    """Abstract class for a population of analog memory devices simulated in parallel (shape matches weight tensor shape)."""
 
     def __init__(self, shape, torch_device="cpu", dtype=torch.float32, seed=0):
         self.shape = tuple(shape)
@@ -28,7 +29,12 @@ class ConductanceDevice(ABC):
 
     @abstractmethod
     def pulse(self, polarity: torch.Tensor, n: torch.Tensor) -> None:
-        """polarity in {-1,0,+1} (LTD/none/LTP), n>=0 tam sayi; G'yi yerinde gunceller."""
+        """
+        Applies programming pulses to W.
+        polarity: sign of pulse in {-1, 0, +1} (LTD / none / LTP)
+        n: tensor of pulse counts (n >= 0, integer)
+        Updates internal state G in-place.
+        """
 
     @property
     @abstractmethod
@@ -37,7 +43,7 @@ class ConductanceDevice(ABC):
     @property
     @abstractmethod
     def nominal_step(self) -> float:
-        """Writer'in pulse->G olceklendirmesi icin nominal ortalama LTP adimi."""
+        """Nominal average LTP step size used by the Writer for scaling pulse counts to conductance updates."""
 
     @property
     def G(self):
@@ -45,7 +51,7 @@ class ConductanceDevice(ABC):
 
 
 class IdealDevice(ConductanceDevice):
-    """Lineer, sinirsiz, gurultusuz referans. Baseline / 'tavan'."""
+    """Linear, unbounded, and noiseless reference device. Represents the baseline / theoretical ceiling."""
 
     def reset(self):
         self._G = torch.zeros(self.shape, device=self.torch_device, dtype=self.dtype)
@@ -54,7 +60,7 @@ class IdealDevice(ConductanceDevice):
         return self._G
 
     def pulse(self, polarity, n):
-        # her pulse tam olarak nominal_step kadar; non-idealite yok
+        # Every programming pulse applies exactly the nominal step; no non-idealities or limits
         self._G = self._G + polarity * n.to(self.dtype) * self.nominal_step
 
     @property

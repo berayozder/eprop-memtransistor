@@ -1,12 +1,13 @@
 """
 run_experiment.py
 -----------------
-Ideal baseline vs memtransistor karsilastirmasi (ayni gorev, ayni e-prop).
-Ciktilar: ogrenme egrileri + son cikti izleri figuru.
+Compares the ideal device baseline vs. memtransistor-in-the-loop simulation
+running on the same task under identical e-prop learning settings.
+Outputs: training curves plot + final signal output comparison plot.
 
-Kullanim:
+Usage:
     python run_experiment.py
-Ekstra deneyler (V_G suprumu, writer=direct, ablation) alttaki main'de acilir.
+Additional parameter sweeps (V_G sweep, writer schemes, ablation study) can be configured in the main block.
 """
 from __future__ import annotations
 import copy
@@ -19,13 +20,13 @@ from train import train, build
 def run_ideal_vs_memtransistor():
     base = ExperimentConfig()
 
-    # --- 1) ideal baseline ---
+    # --- 1) Ideal Baseline (Theoretical ceiling) ---
     cfg_ideal = copy.deepcopy(base)
     cfg_ideal.device.kind = "ideal"
     print("[ideal baseline]")
     _, h_ideal = train(cfg_ideal)
 
-    # --- 2) memtransistor (accumulate writer) ---
+    # --- 2) Memtransistor-in-the-loop (using gradient-accumulate writer) ---
     cfg_mt = copy.deepcopy(base)
     cfg_mt.device.kind = "memtransistor"
     print("[memtransistor + accumulate]")
@@ -44,21 +45,26 @@ def plot(results, fname="learning_curves.png"):
 
     ax[0].plot(h_i["trial"], h_i["loss"], label="ideal baseline")
     ax[0].plot(h_m["trial"], h_m["loss"], label="memtransistor")
-    ax[0].set_xlabel("trial"); ax[0].set_ylabel("MSE loss"); ax[0].set_yscale("log")
-    ax[0].legend(); ax[0].set_title("Ogrenme egrisi")
+    ax[0].set_xlabel("trial")
+    ax[0].set_ylabel("MSE loss")
+    ax[0].set_yscale("log")
+    ax[0].legend()
+    ax[0].set_title("Learning Curves")
 
-    # memtransistor son cikti vs hedef
+    # Plot final target signal vs. memtransistor output
     _, X, Y = build(cfg_m)
     res = net_m.run_trial(X, Y, accumulate_grads=False)
     y = res["y"].detach().cpu().numpy()[:, 0]
-    ax[1].plot(Y.cpu().numpy()[:, 0], "k--", label="hedef")
-    ax[1].plot(y, label="memtransistor cikti")
-    ax[1].set_xlabel("t (ms)"); ax[1].set_ylabel("y"); ax[1].legend()
-    ax[1].set_title("Pattern generation (memtransistor)")
+    ax[1].plot(Y.cpu().numpy()[:, 0], "k--", label="target")
+    ax[1].plot(y, label="memtransistor output")
+    ax[1].set_xlabel("t (ms)")
+    ax[1].set_ylabel("y")
+    ax[1].legend()
+    ax[1].set_title("Pattern Generation (Memtransistor)")
 
     fig.tight_layout()
     fig.savefig(fname, dpi=120)
-    print(f"figur kaydedildi: {fname}")
+    print(f"Figure saved to: {fname}")
 
 
 if __name__ == "__main__":

@@ -1,18 +1,18 @@
 """
 synapse.py
 ----------
-Agirlik <-> iletkenlik kopru + PULSE writer.
+Synaptic weight-to-conductance mapping bridge + PULSE programming writer.
 
-W <-> G eslemesi (tek bipolar cihaz):
-    W = gamma * (G - G_ref),   G_ref = pencere ortasi
-    gamma = w_range / (yarim pencere)
-Boylece isaretli agirlik TEK cihazdan gelir (memtransistor bipolar oldugu icin).
+W <-> G mapping (using a single bipolar memristive device):
+    W = gamma * (G - G_ref),   G_ref = center of the conductance window
+    gamma = w_range / (half conductance window)
+Because MoS2 memtransistors are bipolar, signed weights can be mapped to a single device.
 
-Writer semalari:
-    direct     : istenen DeltaW'yi hemen pulse'lara cevir, yaz.
-    accumulate : DeltaW'yi yuksek-hassasiyet dijital tamponda birik; sadece
-                 |tampon| >= 1 pulse-degeri olunca cihaza pulse at (Demirag ruhu).
-    verify     : oku-yaz kapali dongu; hedef W'ye yaklasana kadar birer pulse.
+Programming Writer Schemes:
+    - direct: Instantly converts target DeltaW to pulses and writes to device.
+    - accumulate: Accumulates micro-updates in a high-precision digital buffer;
+      applies physical programming pulses only when accumulated error exceeds 1 step (e.g. Demirag et al., 2021).
+    - verify: Closed-loop read-write scheme; iteratively applies single pulses until the weight matches the target.
 """
 from __future__ import annotations
 import torch
@@ -22,7 +22,7 @@ class Synapse:
     def __init__(self, device, w_range, writer="accumulate", verify_max_iter=5):
         self.dev = device
         g_lo, g_hi = device.bounds
-        # ideal cihazda sinir sonsuz -> duz esleme (W = G)
+        # Ideal devices have infinite boundaries -> direct mapping (W = G)
         if not (g_lo > -1e30 and g_hi < 1e30):
             self.gamma = 1.0
             self.g_ref = 0.0
@@ -33,16 +33,16 @@ class Synapse:
             self.ideal_map = False
         self.writer = writer
         self.verify_max_iter = verify_max_iter
-        self.w_step = self.gamma * device.nominal_step   # 1 pulse ~ bu kadar agirlik
+        self.w_step = self.gamma * device.nominal_step   # synapic weight change corresponding to 1 pulse
         self.acc = torch.zeros(device.shape, device=device.torch_device, dtype=device.dtype)
-        self.n_pulses_total = 0                          # enerji/metrik sayaci
+        self.n_pulses_total = 0                          # Total applied pulse counter (energy/overhead proxy)
 
-    # -- esleme -----------------------------------------------------------
+    # -- Weight Mapping ---------------------------------------------------
     def weight(self):
         return self.gamma * (self.dev.read() - self.g_ref)
 
     def init_weight(self, W):
-        """Baslangic agirligini cihaz durumuna esle."""
+        """Maps initial weights to physical conductance states."""
         if self.ideal_map:
             self.dev._G = W.clone().to(self.dev.torch_device, self.dev.dtype)
         else:
@@ -52,9 +52,9 @@ class Synapse:
             else:
                 self.dev._G = G
 
-    # -- yazma ------------------------------------------------------------
+    # -- Writing / Programming --------------------------------------------
     def _emit(self, dW_pulses, max_pulses=30):
-        """Isaretli tam sayi pulse vektorunu cihaza uygula (episode basi budce ile sinirli)."""
+        """Applies signed pulse counts to the physical device population."""
         dW_pulses = torch.clamp(dW_pulses, -max_pulses, max_pulses)
         polarity = torch.sign(dW_pulses)
         n = dW_pulses.abs()
@@ -62,7 +62,7 @@ class Synapse:
         self.n_pulses_total += int(n.sum().item())
 
     def update(self, desired_dW):
-        # ideal cihaz: surekli, birebir agirlik guncellemesi (teorik tavan)
+        # Ideal device: Continuous, direct W update (theoretical ceilings)
         if self.ideal_map:
             self.dev._G = self.dev._G + desired_dW
             return
@@ -73,9 +73,9 @@ class Synapse:
 
         elif self.writer == "accumulate":
             self.acc = self.acc + desired_dW
-            n = torch.trunc(self.acc / self.w_step)        # sadece tam pulse'lar
+            n = torch.trunc(self.acc / self.w_step)        # extract whole pulse counts
             self._emit(n)
-            self.acc = self.acc - n * self.w_step          # kalani sakla
+            self.acc = self.acc - n * self.w_step          # retain fractional remainders
 
         elif self.writer == "verify":
             target_W = self.weight() + desired_dW
