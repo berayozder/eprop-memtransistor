@@ -34,8 +34,7 @@ def build(cfg):
     W_rec0 = (trc.w_gain / math.sqrt(n)) * torch.randn(n, n, generator=g)
     W_rec0.fill_diagonal_(0.0)
     W_in0 = (trc.w_gain / math.sqrt(n_in)) * torch.randn(n, n_in, generator=g)
-    W_out = (1.0 / math.sqrt(n)) * torch.randn(n_out, n, generator=g)
-    W_out = W_out.to(dev)
+    W_out0 = (1.0 / math.sqrt(n)) * torch.randn(n_out, n, generator=g)
     b_out = torch.zeros(n_out, device=dev)
 
     # --- Synapse and Device setup (W_rec and W_in are on-device) ---
@@ -46,16 +45,25 @@ def build(cfg):
     syn_rec.init_weight(W_rec0.to(dev))
     syn_in.init_weight(W_in0.to(dev))
 
-    # --- Learning-signal feedback B ---
+    # --- Readout setup: ideal (default) or on-device (ablation/noise propagation) ---
+    if trc.readout_on_device:
+        syn_out = Synapse(_make_device((n_out, n), dc, dev, trc.seed + 3),
+                          sc.w_range, sc.writer, sc.verify_max_iter)
+        syn_out.init_weight(W_out0.to(dev))
+        readout = syn_out
+    else:
+        readout = W_out0.to(dev)
+
+    # --- Learning-signal feedback (symmetric tracks W_out, random uses static B_fixed) ---
     if trc.eprop_variant == "symmetric":
-        B_rec = W_out                                  # Tracks W_out (shares the same tensor)
+        B_fixed = None                                  # Tracks W_out dynamically during run_trial
     elif trc.eprop_variant == "random":
-        B_rec = (1.0 / math.sqrt(n)) * torch.randn(n_out, n, generator=g)
-        B_rec = B_rec.to(dev)                           # Static random feedback
+        B_fixed = ((1.0 / math.sqrt(n)) * torch.randn(n_out, n, generator=g)).to(dev)
     else:
         raise ValueError(trc.eprop_variant)
 
-    net = LSNN(nc, tc, syn_rec, syn_in, W_out, b_out, B_rec, torch_device=dev)
+    net = LSNN(nc, tc, syn_rec, syn_in, readout, b_out,
+               variant=trc.eprop_variant, B_fixed=B_fixed, torch_device=dev)
     X, Y = make_pattern_task(tc, torch_device=dev)
     return net, X, Y
 
@@ -73,12 +81,18 @@ def train(cfg, verbose=True):
         net.syn_rec.update(-lr * res["grad_rec"])
         net.syn_in.update(-lr * res["grad_in"])
 
-        # Readout updates (ideal updates -> symmetric B_rec automatically follows)
-        net.W_out.add_(-lr * res["grad_out"])
-        net.b_out.add_(-lr * res["grad_b"])
+        # Readout updates: update via writer if on-device, else apply ideal update (if trainable)
+        if trc.readout_trainable:
+            if net.readout_is_device:
+                net.readout.update(-lr * res["grad_out"])
+            else:
+                net.readout.add_(-lr * res["grad_out"])
+            net.b_out.add_(-lr * res["grad_b"])
 
         if it % trc.log_every == 0 or it == trc.n_trials - 1:
             pulses = net.syn_rec.n_pulses_total + net.syn_in.n_pulses_total
+            if net.readout_is_device:
+                pulses += net.readout.n_pulses_total
             history["trial"].append(it)
             history["loss"].append(res["loss"])
             history["pulses"].append(pulses)

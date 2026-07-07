@@ -22,14 +22,19 @@ from neurons import heaviside, pseudo_derivative
 
 
 class LSNN:
-    def __init__(self, ncfg, tcfg, syn_rec, syn_in, W_out, b_out, B_rec,
+    def __init__(self, ncfg, tcfg, syn_rec, syn_in, readout, b_out,
+                 variant="symmetric", B_fixed=None,
                  torch_device="cpu", dtype=torch.float32):
         self.nc, self.tc = ncfg, tcfg
         self.syn_rec = syn_rec      # Synapse object (W_rec allocated on device)
         self.syn_in = syn_in        # Synapse object (W_in allocated on device)
-        self.W_out = W_out          # Output readout weights [n_out, n_rec]
-        self.b_out = b_out          # Output readout biases [n_out]
-        self.B_rec = B_rec          # Learning signal feedback matrix [n_out, n_rec]
+        
+        # Readout: either a raw tensor [n_out, n_rec] (ideal) or a Synapse object (on-device)
+        self.readout = readout
+        self.readout_is_device = hasattr(readout, "weight")
+        self.b_out = b_out          # [n_out] bias vector (always simulated ideally)
+        self.variant = variant      # "symmetric" | "random" e-prop variant
+        self.B_fixed = B_fixed      # Fixed random feedback matrix [n_out, n_rec] for random variant
         self.dev = torch_device
         self.dtype = dtype
 
@@ -56,6 +61,14 @@ class LSNN:
         W_rec = self.syn_rec.weight()            # Recurrent weights [n, n]
         W_rec = W_rec - torch.diag(torch.diagonal(W_rec))   # No self-connections
         W_in = self.syn_in.weight()              # Input weights [n, n_in]
+
+        # Readout weight: read from device (noisy) if stored on device, else use raw tensor
+        W_out = self.readout.weight() if self.readout_is_device else self.readout
+        
+        # Learning-signal feedback matrix:
+        #   - symmetric: tracks W_out (if readout is on-device, device noise propagates into feedback)
+        #   - random: static random feedback matrix B_fixed
+        B = W_out if self.variant == "symmetric" else self.B_fixed
 
         z = torch.zeros(n, device=dev, dtype=dt)
         v = torch.zeros(n, device=dev, dtype=dt)
@@ -105,13 +118,13 @@ class LSNN:
             ebar_in = kappa * ebar_in + e_in
 
             # --- Readout & Loss calculation ---
-            y = kappa * y + self.W_out @ z_new + self.b_out    # Output signal [n_out]
+            y = kappa * y + W_out @ z_new + self.b_out         # Output signal [n_out]
             ys[t] = y
             err = y - Ystar[t]                                 # Output error [n_out]
             loss += 0.5 * float((err ** 2).sum().item())
 
             if accumulate_grads:
-                L = self.B_rec.t() @ err                       # Recurrent learning signal [n]
+                L = B.t() @ err                                # Recurrent learning signal [n]
                 grad_rec += L[:, None] * ebar_rec
                 grad_in += L[:, None] * ebar_in
                 zbar_out = kappa * zbar_out + z_new

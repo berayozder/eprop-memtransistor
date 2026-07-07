@@ -26,6 +26,7 @@ LSNN forward (network.py)
 - `task.py` — Pattern generation task data generation (frozen Poisson inputs → target wave).
 - `train.py` — Episodic e-prop training loop.
 - `run_experiment.py` — Compares the ideal baseline vs. memtransistor-in-the-loop, generating output curves.
+- `fit_device.py` — Fits the LTP/LTD step parameters (dp, dd, kp, kd) to Fig. 4c.
 
 ## How to Run
 ```bash
@@ -39,8 +40,14 @@ Apple Silicon: Set `TrainConfig.torch_device = "mps"` in `config.py`.
 - **Writer Comparison:** Compare `SynapseConfig.writer` = "direct" | "accumulate" | "verify".
 - **Non-ideality Ablation:** Toggle `DeviceConfig.enable_{nonlinearity, asymmetry, c2c, d2d}` individually to build a degradation cost table.
 - **e-prop Variants:** Compare `TrainConfig.eprop_variant` = "symmetric" | "random" (weight-transport-free, hardware-plausible).
-- **On-Device Readout:** Set `TrainConfig.readout_on_device = True` (future step).
+- **On-Device Readout:** Set `TrainConfig.readout_on_device = True` (ablation; allows device noise to leak into the learning signal when combined with symmetric e-prop).
+- **Frozen Readout:** Set `TrainConfig.readout_trainable = False` -> keeps readout weights fixed, forcing recurrent e-prop to drive learning (see the important findings note below).
 - **Neuron Heterogeneity:** Vary `NeuronConfig.adaptive_frac` = 0 (pure LIF) ↔ 0.4 (LSNN).
+
+## Important Findings / Warnings
+- **Coarse Device (~10 Levels):** The fit to Fig. 4c saturates in ~10 pulses: dp≈0.32, dd≈0.38 (LTD>LTP asymmetry), kp≈1.76, kd≈2.15. This is a highly challenging but realistic regime for e-prop training (the initial 50-level default was overly optimistic).
+- **The Reservoir Trap:** Combining pattern-generation with a TRAINABLE ideal readout turns the task into a reservoir-computing-like problem. Because the readout layer is powerful enough to solve the task on its own, the recurrent/input on-device weights are rarely modified (~10 pulses over 250 trials). Thus, the core premise of "recurrent SNN training on memristive hardware via e-prop" is not thoroughly tested.
+  *Solutions:* Set `readout_trainable=False` (freezing the readout forces recurrent e-prop to adapt the recurrent hardware connections, resulting in ~30+ pulses), or move to a task requiring temporal credit assignment (e.g. evidence accumulation) where recurrent plasticity is strictly required.
 
 ## Modeling Assumptions to Highlight in the Manuscript
 1. **Episodic e-prop:** Gradients are accumulated over time step 't' during a trial and written at the end of the trial (instead of true per-step online updates). This is a design choice that maps directly onto gradient-accumulation hardware writers.

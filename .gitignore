@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .DS_Store
 learning_curves.png
+device_fit.png

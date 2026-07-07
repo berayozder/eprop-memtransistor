@@ -51,10 +51,10 @@ class DeviceConfig:
     g_min: float = 0.0
     g_max: float = 1.0
     # LTP/LTD base step sizes and nonlinearity parameters (fitted to Sangwan Fig. 4c)
-    dp: float = 0.020             # LTP base step size (at the favorable end)
-    dd: float = 0.020             # LTD base step size (at the favorable end)
-    kp: float = 2.0               # LTP nonlinearity exponent (saturation)
-    kd: float = 2.0               # LTD nonlinearity exponent (saturation)
+    dp: float = 0.320             # LTP base step size (Fig.4c fit)
+    dd: float = 0.378             # LTD base step size (Fig.4c fit; LTP>LTD asymmetry)
+    kp: float = 1.762             # LTP nonlinearity exponent (saturation, Fig.4c fit)
+    kd: float = 2.149             # LTD nonlinearity exponent (saturation, Fig.4c fit)
     sigma_c2c: float = 0.005      # Cycle-to-cycle write noise (absolute conductance G)
     sigma_d2d: float = 0.05       # Device-to-device variation (step scaling factor std)
     read_noise: float = 0.0       # Read noise standard deviation
@@ -68,7 +68,7 @@ class DeviceConfig:
 
 @dataclass
 class SynapseConfig:
-    w_range: float = 1.0          # Synaptic weight scale, mapped to conductance G [g_min, g_max]
+    w_range: float = 0.5          # Synaptic weight scale, mapped to conductance G [g_min, g_max]
     writer: str = "accumulate"    # Programming scheme: "direct" | "accumulate" | "verify"
     verify_max_iter: int = 5      # Maximum loop iterations for write-verify scheme
     weights_on_device: tuple = ("rec", "in")  # Synaptic weights stored on memristive hardware
@@ -78,10 +78,11 @@ class SynapseConfig:
 class TrainConfig:
     n_trials: int = 3000
     lr: float = 5e-3
-    eprop_variant: str = "symmetric"   # "symmetric" | "random" (weight-transport-free)
+    eprop_variant: str = "symmetric"   # "symmetric" | "random"
     readout_on_device: bool = False    # W_out simulated ideally or placed on device
+    readout_trainable: bool = True      # False -> readout frozen; recurrent e-prop drives learning (forces device updates)
     log_every: int = 50
-    torch_device: str = "cpu"          # "mps" (Apple Silicon) | "cuda" | "cpu"
+    torch_device: str = "cpu"          # "mps" (Apple Silicon) | "cpu"
     seed: int = 1
     w_gain: float = 1.0                # Initial weight gain/scale factor
 
