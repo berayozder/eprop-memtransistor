@@ -1,20 +1,21 @@
 """
 network.py
 ----------
-LSNN (mixed LIF + ALIF population) + ONLINE e-prop implementation.
+LSNN (LIF + ALIF karisik) + ONLINE e-prop.
 
-During the SNN forward pass (Bellec et al., 2020):
-  - Membrane / spike dynamics: v, z   (Equations 6, 7, 9, 10)
-  - Pseudo-derivative: psi    (Methods)
-  - Eligibility vectors: zbar (= eps_v, F_alpha(z_pre)), eps_a (ALIF feedback trace, Equation 24)
-  - Eligibility trace: e = psi * (zbar - beta * eps_a)     (Equation 25)
-  - Filtered eligibility trace: ebar = F_kappa(e)          (Equation 28, matching the readout decay rate)
-  - Learning signal: L = (y - y*) @ B                      (Equation 4)
-  - Gradient accumulation: grad_W += L * ebar              (accumulated over time steps 't')
+Ileri gecis sirasinda (Bellec 2020):
+  - membran/spike:      v, z   (denk. 6,7,9,10)
+  - pseudo-derivative:  psi    (Methods)
+  - eligibility vector: zbar (=eps_v, F_alpha(z_pre)),  eps_a (ALIF, denk.24)
+  - eligibility trace:  e = psi*(zbar - beta*eps_a)     (denk.25)
+  - filtreli trace:     ebar = F_kappa(e)               (denk.28, readout leak)
+  - learning signal:    L = (y - y*) @ B                (denk.4)
+  - gradyan:            grad_W += L * ebar   (t uzerinden toplam)
 
-Gradient descent update step: dW = -lr * grad_W.
-Since the gradient is accumulated over 't' during a trial and written at the end of the episode,
-this models "episodic" e-prop. This design aligns naturally with the physical gradient-accumulation writer.
+Gradyan DESCENT icin agirlik guncellemesi: dW = -lr * grad_W.
+Bu grad zaten trial boyunca t uzerinden toplandigi icin "episodic" e-prop'tur
+(= senin acikca deklare edecegin modelleme tercihi; gradient-accumulation
+writer ile birebir ortusur).
 """
 from __future__ import annotations
 import torch
@@ -26,30 +27,30 @@ class LSNN:
                  variant="symmetric", B_fixed=None,
                  torch_device="cpu", dtype=torch.float32):
         self.nc, self.tc = ncfg, tcfg
-        self.syn_rec = syn_rec      # Synapse object (W_rec allocated on device)
-        self.syn_in = syn_in        # Synapse object (W_in allocated on device)
-        
-        # Readout: either a raw tensor [n_out, n_rec] (ideal) or a Synapse object (on-device)
+        self.syn_rec = syn_rec      # Synapse (W_rec cihazda)
+        self.syn_in = syn_in        # Synapse (W_in cihazda)
+        # readout: ya duz tensor [n_out,n_rec] (ideal) ya da Synapse (cihazda)
         self.readout = readout
         self.readout_is_device = hasattr(readout, "weight")
-        self.b_out = b_out          # [n_out] bias vector (always simulated ideally)
-        self.variant = variant      # "symmetric" | "random" e-prop variant
-        self.B_fixed = B_fixed      # Fixed random feedback matrix [n_out, n_rec] for random variant
+        self.b_out = b_out          # [n_out]  (bias her zaman ideal)
+        self.variant = variant      # "symmetric" | "random"
+        self.B_fixed = B_fixed      # random varyant icin sabit feedback [n_out,n_rec]
         self.dev = torch_device
         self.dtype = dtype
 
         n = ncfg.n_rec
-        # Determine adaptive (ALIF) neurons (the first adaptive_frac fraction of the network)
+        # hangi noronlar ALIF? (ilk adaptive_frac orani)
         n_ad = int(round(ncfg.adaptive_frac * n))
         self.is_adaptive = torch.zeros(n, device=torch_device, dtype=dtype)
         self.is_adaptive[:n_ad] = 1.0
-        self.beta_vec = ncfg.beta * self.is_adaptive     # LIF neurons have beta=0
+        self.beta_vec = ncfg.beta * self.is_adaptive     # LIF noronlarda beta=0
 
-    def run_trial(self, X, Ystar, accumulate_grads=True):
+    def run_trial(self, X, Ystar, mask=None, loss="regression", accumulate_grads=True,
+                  return_traces=False):
         """
-        X:     [T, n_in]   Frozen input spike raster
-        Ystar: [T, n_out]  Target wave form
-        Returns: dict containing trial loss, output y, and gradients (grad_rec, grad_in, grad_out, grad_b)
+        X:     [T, n_in]   frozen girdi
+        Ystar: [T, n_out]  hedef
+        Doner: dict(loss, y, grad_rec, grad_in, grad_out, grad_b)
         """
         nc, tc = self.nc, self.tc
         alpha, rho, kappa = nc.alpha, nc.rho, nc.kappa
@@ -58,16 +59,14 @@ class LSNN:
         T = X.shape[0]
         dev, dt = self.dev, self.dtype
 
-        W_rec = self.syn_rec.weight()            # Recurrent weights [n, n]
-        W_rec = W_rec - torch.diag(torch.diagonal(W_rec))   # No self-connections
-        W_in = self.syn_in.weight()              # Input weights [n, n_in]
+        W_rec = self.syn_rec.weight()            # [n, n]
+        W_rec = W_rec - torch.diag(torch.diagonal(W_rec))   # self-connection yok
+        W_in = self.syn_in.weight()              # [n, n_in]
 
-        # Readout weight: read from device (noisy) if stored on device, else use raw tensor
+        # readout agirligi: cihazdaysa (gurultulu) oku, degilse duz tensor
         W_out = self.readout.weight() if self.readout_is_device else self.readout
-        
-        # Learning-signal feedback matrix:
-        #   - symmetric: tracks W_out (if readout is on-device, device noise propagates into feedback)
-        #   - random: static random feedback matrix B_fixed
+        # learning-signal feedback: symmetric -> W_out'u takip eder (cihazdaysa gurultu sizar),
+        #                           random    -> sabit B_fixed
         B = W_out if self.variant == "symmetric" else self.B_fixed
 
         z = torch.zeros(n, device=dev, dtype=dt)
@@ -75,70 +74,86 @@ class LSNN:
         a = torch.zeros(n, device=dev, dtype=dt)
         y = torch.zeros(n_out, device=dev, dtype=dt)
 
-        zbar_rec = torch.zeros(n, device=dev, dtype=dt)      # eps_v (recurrent presynaptic trace)
-        zbar_in = torch.zeros(n_in, device=dev, dtype=dt)    # eps_v (input presynaptic trace)
-        epsa_rec = torch.zeros(n, n, device=dev, dtype=dt)   # eps_a memory feedback trace [post, pre]
+        zbar_rec = torch.zeros(n, device=dev, dtype=dt)      # eps_v (recurrent pre)
+        zbar_in = torch.zeros(n_in, device=dev, dtype=dt)    # eps_v (input pre)
+        epsa_rec = torch.zeros(n, n, device=dev, dtype=dt)   # eps_a [post,pre]
         epsa_in = torch.zeros(n, n_in, device=dev, dtype=dt)
-        ebar_rec = torch.zeros(n, n, device=dev, dtype=dt)   # Filtered recurrent trace
-        ebar_in = torch.zeros(n, n_in, device=dev, dtype=dt) # Filtered input trace
-        zbar_out = torch.zeros(n, device=dev, dtype=dt)      # Post-synaptic trace for readout update
+        ebar_rec = torch.zeros(n, n, device=dev, dtype=dt)
+        ebar_in = torch.zeros(n, n_in, device=dev, dtype=dt)
+        zbar_out = torch.zeros(n, device=dev, dtype=dt)      # readout icin
 
         grad_rec = torch.zeros(n, n, device=dev, dtype=dt)
         grad_in = torch.zeros(n, n_in, device=dev, dtype=dt)
         grad_out = torch.zeros(n_out, n, device=dev, dtype=dt)
         grad_b = torch.zeros(n_out, device=dev, dtype=dt)
 
-        loss = 0.0
+        loss_acc = 0.0
+        n_mask = 0
         ys = torch.zeros(T, n_out, device=dev, dtype=dt)
+        e_rec_list = [] if return_traces else None   # ham eligibility e^t (gradcheck)
+        e_in_list = [] if return_traces else None
 
         for t in range(T):
-            x_t = X[t]                                   # Input spike vector [n_in]
-            
-            # --- Membrane dynamics & spike generation (using z from step t-1) ---
-            I = W_rec @ z + W_in @ x_t                   # Input current [n]
+            x_t = X[t]                                   # [n_in]
+            # --- membran & spike (onceki z ile) ---
+            I = W_rec @ z + W_in @ x_t                   # [n]
             v = alpha * v + I - z * v_th
-            A = v_th + beta * a                          # Adaptive threshold (LIF: A = v_th)
+            A = v_th + beta * a                          # ALIF esigi (LIF: A=v_th)
             z_new = heaviside(v - A)
-            psi = pseudo_derivative(v, A, v_th, nc.gamma_pd)   # Pseudo-derivative [n]
+            psi = pseudo_derivative(v, A, v_th, nc.gamma_pd)   # [n]
 
-            # --- Eligibility vectors (z_pre = z or x_t at step t-1) ---
+            # --- eligibility vektorleri (z_pre = onceki z / x_t) ---
             zbar_rec = alpha * zbar_rec + z              # F_alpha(z^{t-1})
             zbar_in = alpha * zbar_in + x_t
-            
-            # Recurrent and input eligibility traces (Equation 25)
+            # eligibility trace (denk.25) - mevcut psi, zbar, eps_a ile
             e_rec = psi[:, None] * (zbar_rec[None, :] - beta[:, None] * epsa_rec)
             e_in = psi[:, None] * (zbar_in[None, :] - beta[:, None] * epsa_in)
-            
-            # Update ALIF adaptation traces (Equation 24)
+            if return_traces:
+                e_rec_list.append(e_rec.clone())
+                e_in_list.append(e_in.clone())
+            # eps_a guncelle (denk.24)
             epsa_rec = psi[:, None] * zbar_rec[None, :] + (rho - beta[:, None] * psi[:, None]) * epsa_rec
             epsa_in = psi[:, None] * zbar_in[None, :] + (rho - beta[:, None] * psi[:, None]) * epsa_in
-            
-            # Compute filtered eligibility traces (readout leak filter, Equation 28)
+            # filtreli eligibility (readout leak, denk.28)
             ebar_rec = kappa * ebar_rec + e_rec
             ebar_in = kappa * ebar_in + e_in
 
-            # --- Readout & Loss calculation ---
-            y = kappa * y + W_out @ z_new + self.b_out         # Output signal [n_out]
+            # --- readout & hata ---
+            y = kappa * y + W_out @ z_new + self.b_out         # [n_out] (logit/regresyon)
             ys[t] = y
-            err = y - Ystar[t]                                 # Output error [n_out]
-            loss += 0.5 * float((err ** 2).sum().item())
+            m_t = 1.0 if mask is None else float(mask[t])
+
+            if loss == "classification":
+                # softmax + cross-entropy, SADECE maskeli adimlar (karar penceresi)
+                ex = torch.exp(y - y.max())
+                pi = ex / ex.sum()
+                err = (pi - Ystar[t]) * m_t                    # dCE/dlogit (maskeli)
+                if m_t > 0:
+                    loss_acc += -float((Ystar[t] * torch.log(pi + 1e-9)).sum().item())
+                    n_mask += 1
+            else:
+                err = (y - Ystar[t])                           # regresyon (MSE)
+                loss_acc += 0.5 * float((err ** 2).sum().item())
+                n_mask += 1
 
             if accumulate_grads:
-                L = B.t() @ err                                # Recurrent learning signal [n]
+                L = B.t() @ err                                # [n] learning signal
                 grad_rec += L[:, None] * ebar_rec
                 grad_in += L[:, None] * ebar_in
                 zbar_out = kappa * zbar_out + z_new
                 grad_out += err[:, None] * zbar_out[None, :]
                 grad_b += err
 
-            a = rho * a + z_new                                # ALIF Adaptation variable update (Equation 10)
+            a = rho * a + z_new                                # adaptasyon (denk.10)
             z = z_new
 
         return {
-            "loss": loss / T,
+            "loss": loss_acc / max(n_mask, 1),
             "y": ys,
             "grad_rec": grad_rec / T,
             "grad_in": grad_in / T,
             "grad_out": grad_out / T,
             "grad_b": grad_b / T,
+            "e_rec_list": e_rec_list,
+            "e_in_list": e_in_list,
         }

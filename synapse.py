@@ -33,7 +33,7 @@ class Synapse:
             self.ideal_map = False
         self.writer = writer
         self.verify_max_iter = verify_max_iter
-        self.w_step = self.gamma * device.nominal_step   # synapic weight change corresponding to 1 pulse
+        self.w_step = self.gamma * device.nominal_step   # synaptic weight change corresponding to 1 pulse
         self.acc = torch.zeros(device.shape, device=device.torch_device, dtype=device.dtype)
         self.n_pulses_total = 0                          # Total applied pulse counter (energy/overhead proxy)
 

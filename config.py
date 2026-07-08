@@ -36,13 +36,25 @@ class NeuronConfig:
 
 @dataclass
 class TaskConfig:
-    T: int = 500                # Trial length (steps)
-    n_in: int = 20              # Input channels (frozen spike raster)
-    input_rate: float = 0.05    # Frozen input spike probability per step
-    n_out: int = 1
-    freqs: tuple = (2.0,)       # Target signal frequencies (sum of sines)
-    amps: tuple = (1.0,)        # Amplitudes of target signal components
+    kind: str = "evidence"          # "evidence" | "pattern"
+    n_out: int = 2                  # evidence: 2 (left/right); pattern: 1
     seed: int = 0
+    # --- Pattern generation ---
+    T: int = 500
+    n_in: int = 20
+    input_rate: float = 0.05
+    freqs: tuple = (2.0,)
+    amps: tuple = (1.0,)
+    # --- Evidence accumulation (Bellec 2020, Fig.3) ---
+    n_group: int = 10               # Neurons per channel group: [left | right | recall | noise]
+    n_cues: int = 7                 # Number of cues (odd number prevents ties)
+    cue_dur: int = 15               # Duration of each cue (steps)
+    gap: int = 5                    # Time gap between cues
+    delay: int = 50                 # Delay between final cue and decision window (working memory)
+    decision: int = 30              # Decision (recall) window duration
+    cue_rate: float = 0.4           # Active cue/recall spike probability per step
+    noise_rate: float = 0.05        # Background noise rate
+    p_left: float = 0.5
 
 
 @dataclass
@@ -51,14 +63,15 @@ class DeviceConfig:
     g_min: float = 0.0
     g_max: float = 1.0
     # LTP/LTD base step sizes and nonlinearity parameters (fitted to Sangwan Fig. 4c)
-    dp: float = 0.320             # LTP base step size (Fig.4c fit)
-    dd: float = 0.378             # LTD base step size (Fig.4c fit; LTP>LTD asymmetry)
-    kp: float = 1.762             # LTP nonlinearity exponent (saturation, Fig.4c fit)
-    kd: float = 2.149             # LTD nonlinearity exponent (saturation, Fig.4c fit)
+    dp: float = 0.2248            # LTP base step size (Fig.4c fit, RMSE 0.005)
+    dd: float = 0.8698            # LTD base step size (Fig.4c fit) - dd/dp~3.9 => sudden depression
+    kp: float = 1.537            # LTP nonlinearity exponent (saturation, Fig.4c fit)
+    kd: float = 3.762            # LTD nonlinearity exponent (saturation, Fig.4c fit) - gradual tail
     sigma_c2c: float = 0.005      # Cycle-to-cycle write noise (absolute conductance G)
     sigma_d2d: float = 0.05       # Device-to-device variation (step scaling factor std)
     read_noise: float = 0.0       # Read noise standard deviation
-    V_G: float = 30.0             # Gate voltage: tunes dynamic range and programming granularity
+    V_G: float = 50.0             # Gate: Fig.4c fit reference (gate=1, max switching ratio)
+    step_scale: float = 1.0       # Pulse step scale factor: <1 => smaller steps => MORE STATES (quantization ablation)
     # Ablation keys for non-idealities
     enable_nonlinearity: bool = True
     enable_asymmetry: bool = True

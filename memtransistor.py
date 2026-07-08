@@ -1,18 +1,36 @@
 """
 memtransistor.py
 ----------------
-Phenomenological model of the MoS2 memtransistor (Sangwan 2018).
+Phenomenological model of the MoS2 memtransistor (Sangwan 2018, Nature 554:500).
   - Bipolar behavior: Positive pulses trigger LTP, negative pulses trigger LTD (Fig. 4c).
   - Pulse-based: Each update depends on the current state (nonlinear, asymmetric, saturating).
     Applying 'n' pulses corresponds to 'n' sequential state updates, matching the physics of programming.
-  - V_G (Gate Voltage): Controls the dynamic range and update granularity (Fig. 2b inset:
-    switching ratio varies with V_G from ~300 to ~8). It scales the usable conductance window and step sizes.
+  - V_G (Gate Voltage): Tunes the usable dynamic range (and thus the number of distinguishable conductance states).
   - Non-idealities can be individually toggled for ablation studies.
 
 State-dependent conductance update step (saturating exponential, matching Fig. 4c characteristics):
   LTP: G <- G + dp * exp(-kp * (G - g_lo)/(g_hi - g_lo))     (large steps near g_lo, small near g_hi)
-  LTD: G <- G - dd * exp(-kd * (g_hi - G)/(g_hi - g_lo))     (large steps near g_hi, small near g_lo)
+  LTD: G <- G - dd * exp(-kd * (g_hi - G)/(g_hi - g_lo))     (large steps near g_hi => sudden depression)
 The step size decays naturally near the boundaries, capturing the essence of the Sangwan window function.
+dp, dd, kp, kd are fitted to Fig. 4c pulse-response data (see fit_device.py).
+
+===== V_G CALIBRATION (Sangwan Fig. 2b/2e) =====
+According to the paper: when V_G decreases from +50V to -50V, the switching ratio (I_LRS/I_HRS at VD=0.5V)
+drops from 300 down to 8 (~37x). A high switching ratio translates to a wide dynamic range and more
+resolvable conductance states. We thus model the number of distinguishable states proportional to the
+switching ratio: n_states(V_G) ~ SR(V_G).
+The switching ratio (SR) is interpolated in log-space between the two experimental points [(-50V, 8), (+50V, 300)]
+(since resistance changes exponentially with gate voltage). gate = SR(V_G)/SR_max in (0, 1] with SR_max = 300 (+50V).
+Thus:
+  - gate scales the conductance window span; the absolute pulse steps (dp, dd) remain constant.
+    Therefore, high V_G (wide span) = many memory states; low V_G = coarse quantization.
+  - The W<->G affine mapping does not cancel out the V_G resolution effect because nominal_step does not include the gate factor.
+
+MODELING ASSUMPTIONS (should be declared in the manuscript):
+  1) The experimental data of Fig. 4c LTP/LTD is assumed to be measured at the maximum switching ratio regime (gate=1, V_G~+50V);
+     the fitted parameters dp/dd are valid at this reference gate voltage. The default V_G is set to this reference (= 50V).
+  2) The switching ratio is a multiplicative quantity (I_LRS/I_HRS); we use it as a proxy for the additive conductance window span (phenomenological).
+  3) The gate dependence between the limits (-50V and +50V) is modeled via log-interpolation.
 """
 from __future__ import annotations
 import math
@@ -20,13 +38,22 @@ import torch
 from device_interface import ConductanceDevice
 
 
+# ---- Sangwan Fig. 2b/2e: switching ratio (I_LRS/I_HRS) vs V_G ----
+_SR_LO, _SR_HI = 8.0, 300.0       # Measured switching ratios at -50V and +50V
+_VG_LO, _VG_HI = -50.0, 50.0
+_SR_MAX = _SR_HI                   # Normalization reference (gate=1 @ +50V)
+
+
+def switching_ratio(V_G: float) -> float:
+    """V_G -> switching ratio (I_LRS/I_HRS). Interpolates in log-space between the experimental limits."""
+    vg = max(_VG_LO, min(_VG_HI, V_G))
+    frac = (vg - _VG_LO) / (_VG_HI - _VG_LO)                 # [0, 1]
+    return math.exp(math.log(_SR_LO) + frac * (math.log(_SR_HI) - math.log(_SR_LO)))
+
+
 def gate_gain(V_G: float) -> float:
-    """
-    Computes V_G -> usable dynamic range / granularity scaling factor in (0, 1].
-    High V_G -> wider conductance window, more resolvable memory states.
-    V_G range ~ [-50, 50] maps to ~ [0.15, 1.0], matching the switching ratio trend in Fig. 2b.
-    """
-    return 0.15 + 0.85 * (1.0 / (1.0 + math.exp(-0.08 * V_G)))
+    """V_G -> usable window / resolution scale factor in (0, 1]. Calibrated to switching ratio: gate = SR(V_G)/SR_max."""
+    return min(1.0, switching_ratio(V_G) / _SR_MAX)
 
 
 class Memtransistor(ConductanceDevice):
@@ -38,7 +65,7 @@ class Memtransistor(ConductanceDevice):
     def reset(self):
         c = self.cfg
         g = gate_gain(c.V_G)
-        # V_G restricts the dynamic range (low V_G yields small switching ratio)
+        # V_G scales the usable window (lower V_G -> smaller switching ratio -> fewer memory states)
         self.g_lo = c.g_min
         self.g_hi = c.g_min + (c.g_max - c.g_min) * g
         self._gate = g
@@ -67,18 +94,14 @@ class Memtransistor(ConductanceDevice):
 
     # -- Pulse Delta Calculation ------------------------------------------
     def _delta(self, polarity):
-        """
-        Calculates the single-pulse DeltaG update step.
-        polarity: +1 for LTP, -1 for LTD, 0 for no update.
-        Shape matches self.shape.
-        """
+        """polarity: +1 for LTP, -1 for LTD, 0 for no update. Returns DeltaG tensor matching shape."""
         c = self.cfg
         span = max(self.g_hi - self.g_lo, 1e-8)
-        gnorm = (self._G - self.g_lo) / span          # Normalized conductance in [0,1]
+        gnorm = (self._G - self.g_lo) / span          # Normalized conductance G in [0, 1]
 
         if c.enable_nonlinearity:
             ltp = c.dp * torch.exp(-c.kp * gnorm)         # Large step size near g_lo, decays near g_hi
-            ltd = c.dd * torch.exp(-c.kd * (1.0 - gnorm)) # Large step size near g_hi, decays near g_lo
+            ltd = c.dd * torch.exp(-c.kd * (1.0 - gnorm)) # Large step size near g_hi, decays near g_lo (sudden)
         else:
             ltp = torch.full_like(self._G, c.dp)
             ltd = torch.full_like(self._G, c.dd)
@@ -87,15 +110,21 @@ class Memtransistor(ConductanceDevice):
             # When asymmetry is disabled, LTD step sizes mirror LTP
             ltd = ltp.clone()
 
-        # Gate voltage granularity scale: lower V_G leads to smaller conductance windows & step sizes
-        ltp = ltp * self._gate * self._d2d
-        ltd = ltd * self._gate * self._d2d
+        # Resolution scaling: smaller step_scale = smaller update steps = MORE STATES (quantization ablation)
+        ltp = ltp * c.step_scale
+        ltd = ltd * c.step_scale
+
+        # NOTE: programming steps are not scaled by the gate factor. The gate only scales the span (window range).
+        # Since absolute step size is constant, higher V_G (wider span) leads to more states.
+        # W<->G mapping scaling (gamma ~ 1/span) does not cancel this resolution effect.
+        ltp = ltp * self._d2d
+        ltd = ltd * self._d2d
 
         step = torch.where(polarity > 0, ltp, torch.where(polarity < 0, -ltd, torch.zeros_like(ltp)))
         return step
 
     def pulse(self, polarity, n):
-        """Applies 'n' pulses sequentially to the device population (iteratively updated 'n' times)."""
+        """Applies 'n' sequential programming pulses (vectorized loop up to max(n))."""
         c = self.cfg
         n = n.to(torch.int64)
         max_n = int(n.max().item()) if n.numel() else 0
@@ -116,5 +145,7 @@ class Memtransistor(ConductanceDevice):
 
     @property
     def nominal_step(self):
-        # Nominal average LTP step size evaluated at the center of the conductance window
-        return 0.5 * (self.cfg.dp + self.cfg.dd) * self._gate * math.exp(-0.5 * self.cfg.kp)
+        # Nominal average step evaluated at the center of the conductance window.
+        # NO GATE FACTOR: actual DeltaG per pulse is gate-independent.
+        # Thus w_step = gamma*nominal_step ~ 1/span ~ 1/gate -> V_G controls synaptic resolution.
+        return 0.5 * (self.cfg.dp + self.cfg.dd) * self.cfg.step_scale * math.exp(-0.5 * self.cfg.kp)

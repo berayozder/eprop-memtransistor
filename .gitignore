@@ -4,3 +4,6 @@ __pycache__/
 .DS_Store
 learning_curves.png
 device_fit.png
+matrix_figures.png
+matrix_results.csv
+evidence_curves.png
