@@ -4,6 +4,12 @@ gradcheck.py
 Proves the MATHEMATICAL CORRECTNESS of the e-prop implementation in network.py by
 comparing it against an independent autograd/BPTT reference.
 
+CUSTOM DESIGN: the four-test structure below (feedforward exactness, recurrent
+cosine alignment, LIF exact factorization via autograd, readout/bias exactness) is
+this project's own verification methodology -- built to exercise the mathematical
+guarantees Bellec 2020 states (Eqs. 1,3,25 etc.), but the test DESIGN itself is
+original, not specified by the paper.
+
 e-prop is a mathematical approximation of BPTT in recurrent networks (it drops
 route (ii), the inter-neuron backward path). So the meaningful tests are:
 
@@ -82,9 +88,11 @@ def autograd_forward(X, Ystar, W_rec, W_in, W_out, b_out, beta_vec, nc):
 def _prep(cfg):
     """Build net from config; return net, data, and leaf-cloneable weights.
     W_rec diagonal is zeroed to match network.py (no self-connections)."""
-    net, task = build(cfg)
-    X, Y = task["X"], task["Y"]
-    T = X.shape[0]
+    net, _ = build(cfg)
+    g = torch.Generator(device="cpu").manual_seed(42)
+    T, n_in, n_out = cfg.task.T, cfg.task.n_in, cfg.task.n_out
+    X = (torch.rand(T, n_in, generator=g) < 0.2).to(torch.float32)
+    Y = torch.randn(T, n_out, generator=g, dtype=torch.float32)
     W_rec = net.syn_rec.weight().clone()
     W_rec = W_rec - torch.diag(torch.diagonal(W_rec))
     return (net, X, Y, T, W_rec, net.syn_in.weight().clone(),
@@ -101,12 +109,10 @@ def _cos(a, b):
 
 def _small_cfg(adaptive_frac):
     cfg = ExperimentConfig()
-    cfg.task.kind = "pattern"
+    cfg.task.kind = "evidence"
     cfg.task.n_out = 1
     cfg.task.n_in = 4
     cfg.task.T = 20
-    cfg.task.freqs = (2.0,)
-    cfg.task.amps = (1.0,)
     cfg.neuron.n_rec = 6
     cfg.neuron.adaptive_frac = adaptive_frac
     cfg.device.kind = "ideal"
@@ -223,7 +229,7 @@ def test4_readout_bias():
         p = r_out < 1e-4 and r_b < 1e-4
         ok &= p
         print(f"  {name:16s} grad_out {r_out:.2e} | grad_b {r_b:.2e}  {'PASSED' if p else 'FAILED'}")
-    print(f"  --> {'ALL PASSED' if ok else 'FAILED'}  (readout gradients are exact; bias is kappa-filtered)")
+    print(f"  --> {'ALL PASSED' if ok else 'FAILED'}  (readout gradients exact; bias is kappa-filtered)")
     return ok
 
 
